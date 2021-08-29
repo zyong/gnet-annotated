@@ -155,19 +155,27 @@ func (el *eventloop) loopWrite(c *conn) error {
 	// 返回outboundBuffer的数据
 	// outboundBuffer使用ringbuffer实现
 	// ringbuffer https://github.com/smallnest/ringbuffer
-	// ringbuffer解决了
+	// ringbuffer解决了内存buffer的读写性能问题
+	// ringbuffer不用gc，数据通过重写来覆盖原有数据
 	head, tail := c.outboundBuffer.PeekAll()
 	var (
 		n   int
 		err error
 	)
 	// 调用底层的写操作
+	// io.writev
 	if len(tail) > 0 {
 		n, err = io.Writev(c.fd, [][]byte{head, tail})
 	} else {
 		n, err = unix.Write(c.fd, head)
 	}
+	// 设置buffer的r指针
 	c.outboundBuffer.Discard(n)
+
+	// 对写入失败的处理
+	// 1 nil，ErrShortWritev 没有send all数据时发生
+	// 2 EAGAIN there is no data available right now, try again later
+	// 如果两个都不是，写出问题了关闭conn
 	switch err {
 	case nil, gerrors.ErrShortWritev: // do nothing, just go on
 	case unix.EAGAIN:
@@ -178,6 +186,7 @@ func (el *eventloop) loopWrite(c *conn) error {
 
 	// All data have been drained, it's no need to monitor the writable events,
 	// remove the writable event from poller to help the future event-loops.
+	// 所有数据都写入，移除可写事件
 	if c.outboundBuffer.IsEmpty() {
 		_ = el.poller.ModRead(c.pollAttachment)
 	}
@@ -185,12 +194,14 @@ func (el *eventloop) loopWrite(c *conn) error {
 	return nil
 }
 
+// loop 关闭连接
 func (el *eventloop) loopCloseConn(c *conn, err error) (rerr error) {
 	if !c.opened {
 		return
 	}
 
 	// Send residual data in buffer back to client before actually closing the connection.
+	// 写剩余的数据到客户端,每个c的ringbuffer都是独立的
 	if !c.outboundBuffer.IsEmpty() {
 		el.eventHandler.PreWrite()
 
@@ -202,8 +213,11 @@ func (el *eventloop) loopCloseConn(c *conn, err error) (rerr error) {
 		}
 	}
 
+	// 删除epoll中队c.fd的关注，关闭c.fd描述符
 	if err0, err1 := el.poller.Delete(c.fd), unix.Close(c.fd); err0 == nil && err1 == nil {
+		//删除connections map中的fd
 		delete(el.connections, c.fd)
+		// connection数，-1
 		el.addConn(-1)
 
 		if el.eventHandler.OnClosed(c, err) == Shutdown {

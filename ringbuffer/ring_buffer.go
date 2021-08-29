@@ -51,6 +51,7 @@ func New(size int) *RingBuffer {
 	if size == 0 {
 		return &RingBuffer{isEmpty: true}
 	}
+	// 取size的2的指数近似值
 	size = internal.CeilToPowerOfTwo(size)
 	return &RingBuffer{
 		buf:     make([]byte, size),
@@ -69,6 +70,7 @@ func (r *RingBuffer) Peek(n int) (head []byte, tail []byte) {
 		return
 	}
 
+	// 正常情况，w指针大于r指针
 	if r.w > r.r {
 		m := r.w - r.r // length of ring-buffer
 		if m > n {
@@ -78,14 +80,21 @@ func (r *RingBuffer) Peek(n int) (head []byte, tail []byte) {
 		return
 	}
 
+	// w指针已经走了一圈，此时w比r小，
+	// size-r+w等于1圈-已经读取的+新写入的
 	m := r.size - r.r + r.w // length of ring-buffer
 	if m > n {
 		m = n
 	}
 
+	// 可取的bytes数量小于整个buffer的尺寸，直接取就可以
 	if r.r+m <= r.size {
 		head = r.buf[r.r : r.r+m]
 	} else {
+		// 如果大于size的大小，就要设置head和tail
+		// head表示从r指针开始到buffer切片尾部的数据切片
+		// tail表示从0开始到c2的切片
+		// c2就是大于size后覆盖写入的部分
 		c1 := r.size - r.r
 		head = r.buf[r.r:]
 		c2 := m - c1
@@ -101,11 +110,14 @@ func (r *RingBuffer) PeekAll() (head []byte, tail []byte) {
 		return
 	}
 
+	// 如果w指针大于读指针，证明在两者之间有数据
+	// 所以返回读和写之间的数据就可以
 	if r.w > r.r {
 		head = r.buf[r.r:r.w]
 		return
 	}
 
+	// w指针不比r指针大，证明没有
 	head = r.buf[r.r:]
 	if r.w != 0 {
 		tail = r.buf[:r.w]
