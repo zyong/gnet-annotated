@@ -45,6 +45,9 @@ type eventloop struct {
 
 	// Prevents eventloop from false sharing by padding extra memory with the difference
 	// between the cache line size "s" and (eventloop mod s) for the most common CPU architectures.
+	// 这个操作的目的是为了解决多核CPU伪共享所导致的性能问题
+	// 实际做法就是使用64-结构已经使用的大小%64的结果，使用64byte补齐大小，避免CPU cache line问题，
+	// 使每个CPU核心只操作自己的部分数据
 	_ [64 - unsafe.Sizeof(internalEventloop{})%64]byte
 }
 
@@ -146,13 +149,19 @@ func (el *eventloop) loopRead(c *conn) error {
 }
 
 func (el *eventloop) loopWrite(c *conn) error {
+	// prewrite 类似AOP操作的pre操作
 	el.eventHandler.PreWrite()
 
+	// 返回outboundBuffer的数据
+	// outboundBuffer使用ringbuffer实现
+	// ringbuffer https://github.com/smallnest/ringbuffer
+	// ringbuffer解决了
 	head, tail := c.outboundBuffer.PeekAll()
 	var (
 		n   int
 		err error
 	)
+	// 调用底层的写操作
 	if len(tail) > 0 {
 		n, err = io.Writev(c.fd, [][]byte{head, tail})
 	} else {

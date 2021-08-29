@@ -95,18 +95,27 @@ func (el *eventloop) activateSubReactor(lockOSThread bool) {
 }
 
 func (el *eventloop) loopRun(lockOSThread bool) {
+	//lockOSThread 锁定os线程捆绑一个goroutine与当前运行线程的关系，
+	//让goroutine一直运行在这个线程中，同时不会有其他goroutine运行在其中
+	//如果goroutine退出但没有unlockOSThread，线程会被terminated
 	if lockOSThread {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
 	}
 
+	//eventloop循环结束，关闭所有连接
+	//server.listener关闭
+	//发送shutdown信号
 	defer func() {
 		el.closeAllConns()
 		el.ln.close()
 		el.svr.signalShutdown()
 	}()
 
+
+	// 轮询为循环调用，获取每个连接fd，执行
 	err := el.poller.Polling(func(fd int, ev uint32) (err error) {
+		// eventloop通过connections记录所有的connection和fd的关系
 		if c, ok := el.connections[fd]; ok {
 			// Don't change the ordering of processing EPOLLOUT | EPOLLRDHUP / EPOLLIN unless you're 100%
 			// sure what you're doing!
@@ -119,7 +128,11 @@ func (el *eventloop) loopRun(lockOSThread bool) {
 			// In either case loopWrite() should take care of it properly:
 			// 1) writing data back,
 			// 2) closing the connection.
+			// ev是eventloop.events
+			// ev & netpoll.OutEvents表示当前fd关注的事件与outEvents有交集
+			// c是具体的连接conn，c.outboundBuffer 是连接中等待写的数据
 			if ev&netpoll.OutEvents != 0 && !c.outboundBuffer.IsEmpty() {
+				// 使用eventloop循环写c的数据到远端
 				if err := el.loopWrite(c); err != nil {
 					return err
 				}

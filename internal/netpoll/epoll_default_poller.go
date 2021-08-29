@@ -50,11 +50,13 @@ type Poller struct {
 // OpenPoller instantiates a poller.
 func OpenPoller() (poller *Poller, err error) {
 	poller = new(Poller)
+	//创建epoll文件描述符，EPOLL_CLOEXEC解决新创建进程fd 关闭问题
 	if poller.fd, err = unix.EpollCreate1(unix.EPOLL_CLOEXEC); err != nil {
 		poller = nil
 		err = os.NewSyscallError("epoll_create1", err)
 		return
 	}
+	// 创建用于事件通知的描述符,初始值一般为0，设置为非阻塞模式
 	if poller.wfd, err = unix.Eventfd(0, unix.EFD_NONBLOCK|unix.EFD_CLOEXEC); err != nil {
 		_ = poller.Close()
 		poller = nil
@@ -84,6 +86,7 @@ func (p *Poller) Close() error {
 // according to http://man7.org/linux/man-pages/man2/eventfd.2.html.
 var (
 	u uint64 = 1
+	//用来给unix.Write作为写入参数,代表一个8字节数组的切片
 	b        = (*(*[8]byte)(unsafe.Pointer(&u)))[:]
 )
 
@@ -97,6 +100,7 @@ func (p *Poller) UrgentTrigger(fn queue.TaskFunc, arg interface{}) (err error) {
 	task.Run, task.Arg = fn, arg
 	p.priorAsyncTaskQueue.Enqueue(task)
 	if atomic.CompareAndSwapInt32(&p.netpollWakeSig, 0, 1) {
+		//空循环保证unix.Write成功， 写入一个8字节切片，b的值为1
 		for _, err = unix.Write(p.wfd, b); err == unix.EINTR || err == unix.EAGAIN; _, err = unix.Write(p.wfd, b) {
 		}
 	}
@@ -120,14 +124,20 @@ func (p *Poller) Trigger(fn queue.TaskFunc, arg interface{}) (err error) {
 
 // Polling blocks the current goroutine, waiting for network-events.
 func (p *Poller) Polling(callback func(fd int, ev uint32) error) error {
+	//初始化事件循环eventloop，eventloop的大小为cap提供，默认128
 	el := newEventList(InitPollEventsCap)
 	var wakenUp bool
 
 	msec := -1
 	for {
+		//调用epollwait来等待事件产生
+		// el.event为空，等待epoll_wait来填充
+		//返回值n为要处理的事件数目
 		n, err := unix.EpollWait(p.fd, el.events, msec)
+		// n==0表示超时，-1表示出现错误，EINTR中断错误
 		if n == 0 || (n < 0 && err == unix.EINTR) {
 			msec = -1
+			//触发其他调用
 			runtime.Gosched()
 			continue
 		} else if err != nil {
@@ -136,6 +146,7 @@ func (p *Poller) Polling(callback func(fd int, ev uint32) error) error {
 		}
 		msec = 0
 
+		//处理event
 		for i := 0; i < n; i++ {
 			ev := &el.events[i]
 			if fd := int(ev.Fd); fd != p.wfd {
@@ -147,6 +158,7 @@ func (p *Poller) Polling(callback func(fd int, ev uint32) error) error {
 					logging.Warnf("error occurs in event-loop: %v", err)
 				}
 			} else { // poller is awaken to run tasks in queues.
+				// 异步处理任务
 				wakenUp = true
 				_, _ = unix.Read(p.wfd, p.wfdBuf)
 			}
@@ -206,6 +218,7 @@ func (p *Poller) AddReadWrite(pa *PollAttachment) error {
 }
 
 // AddRead registers the given file-descriptor with readable event to the poller.
+// 将pa中的FD添加到epoll的epfd中，
 func (p *Poller) AddRead(pa *PollAttachment) error {
 	return os.NewSyscallError("epoll_ctl add",
 		unix.EpollCtl(p.fd, unix.EPOLL_CTL_ADD, pa.FD, &unix.EpollEvent{Fd: int32(pa.FD), Events: readEvents}))
